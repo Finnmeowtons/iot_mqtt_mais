@@ -1,7 +1,14 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <DHT.h>
+#include <ArduinoJson.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <SoftwareSerial.h>
 
+#define device_id 1  // Device ID number!!!
+
+// WiFi & MQTT Setup
 const char* ssid = "tp-link";
 const char* password = "09270734452";
 const char* mqtt_server = "157.245.204.46";
@@ -10,16 +17,34 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 
 #define DHTTYPE DHT11
-const int DHTPin = 0;
-const int SoilMoisturePin = A0;
-DHT dht(DHTPin, DHTTYPE);
+#define DHTPin 0            // DHT11 sensor pin
+#define SoilMoisturePin A0  // Soil Moisture Sensor pin
+#define DS18B20_PIN 4       // DS18B20 sensor pin (soil temperature)
 
-#define TEMP_TOPIC "sensor/device1/temperature"
-#define HUMIDITY_TOPIC "sensor/device1/humidity"
+// RS485 Soil pH Sensor
+#define DE 12
+#define RE 14
+SoftwareSerial mod(13, 5);  // RO on GPIO13 (D7), DI on GPIO5 (D1)
+const byte ph_request[] = { 0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A };
+byte values[11];
+
+DHT dht(DHTPin, DHTTYPE);
+OneWire oneWire(DS18B20_PIN);
+DallasTemperature DS18B20(&oneWire);
+
+#define SENSOR_TOPIC "sensor/device1/data"  // Single topic for JSON data
 
 void setup() {
   Serial.begin(115200);
+
   dht.begin();
+  DS18B20.begin();
+  mod.begin(4800);
+
+  pinMode(DE, OUTPUT);
+  pinMode(RE, OUTPUT);
+  digitalWrite(DE, LOW);
+  digitalWrite(RE, LOW);
 
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
@@ -30,6 +55,7 @@ void setup() {
 
   client.setServer(mqtt_server, 1883);
   reconnect();
+
 }
 
 void loop() {
@@ -38,63 +64,127 @@ void loop() {
   }
   client.loop();
 
-  sendTemperatureData();
-  // soilMoistureData();
+  sendSensorData();  // Send all sensor data as JSON
 
   delay(5000);  // Publish every 5 seconds
 }
 
-void soilMoistureData() {
-  float moisture_percentage = (100.00 - ((analogRead(SoilMoisturePin) / 1023.00) * 100.00));
+// 🌱 Soil Moisture Data (Returns Raw & Percentage)
+void soilMoistureData(float data[2]) {
+  int rawValue = analogRead(SoilMoisturePin);
+  float moisture_percentage = 100.00 - ((rawValue / 1023.00) * 100.00);
 
-  Serial.print("Soil Moisture(in Percentage) = ");
-  Serial.print(moisture_percentage);
-  Serial.println("%");
+  data[0] = rawValue;
+  data[1] = moisture_percentage;
 }
 
-float lastTemperature = -1000.0;
-float lastHumidity = -1000.0;
-
-void sendTemperatureData() {
+// 🌡️ Temperature & Humidity Data (Returns Temp & Humidity)
+bool temperatureData(float data[2]) {
   float humidity = dht.readHumidity();
   float temperature = dht.readTemperature();
 
   if (isnan(humidity) || isnan(temperature)) {
     Serial.println("❌ Failed to read from DHT sensor!");
-    return;
+    return false;
   }
 
-  // Check if values changed before sending
-  if (temperature == lastTemperature && humidity == lastHumidity) {
-    Serial.println("🔄 No change in temperature or humidity, skipping MQTT publish.");
-    return;
-  }
-
-  lastTemperature = temperature;
-  lastHumidity = humidity;
-
-  Serial.print("📡 Sending Data - Temperature: ");
-  Serial.print(temperature);
-  Serial.print("°C, Humidity: ");
-  Serial.print(humidity);
-  Serial.println("%");
-
-  // Convert float to string before sending via MQTT
-  char tempString[8], humString[8];
-  dtostrf(temperature, 6, 2, tempString);
-  dtostrf(humidity, 6, 2, humString);
-
-  client.publish(TEMP_TOPIC, tempString);
-  client.publish(HUMIDITY_TOPIC, humString);
+  data[0] = temperature;
+  data[1] = humidity;
+  return true;
 }
 
+// 🌎 Soil Temperature from DS18B20
+float getSoilTemperature() {
+  DS18B20.requestTemperatures();
+  return DS18B20.getTempCByIndex(0);
+}
+
+// 📏 Soil pH Measurement (Averaged)
+float getSoilPH() {
+  const int NUM_READINGS = 5;
+  float totalPH = 0;
+  int validReadings = 0;
+
+  for (int i = 0; i < NUM_READINGS; i++) {
+    digitalWrite(DE, HIGH);
+    digitalWrite(RE, HIGH);
+    delay(10);
+
+    if (mod.write(ph_request, sizeof(ph_request)) == 8) {
+      digitalWrite(DE, LOW);
+      digitalWrite(RE, LOW);
+      delay(100);
+
+      for (byte j = 0; j < 11; j++) {
+        values[j] = mod.read();
+      }
+
+      // Serial.print("Raw Data: ");
+      for (byte j = 0; j < 11; j++) {
+        // Serial.print(values[j], HEX);
+        // Serial.print(" ");
+      }
+      // Serial.println();
+
+      int raw_ph = (values[3] << 8) | values[4];
+      float soil_ph = raw_ph / 10.0;
+
+      if (soil_ph >= 3.5 && soil_ph <= 9.0) {
+        totalPH += soil_ph;
+        validReadings++;
+      }
+    }
+
+    delay(500);
+  }
+
+  return (validReadings > 0) ? (totalPH / validReadings) : -1;
+}
+
+// 📡 Send All Sensor Data as JSON
+void sendSensorData() {
+  float soilData[2];
+  float tempData[2];
+  float soilTemperature = getSoilTemperature();
+  float soilPH = getSoilPH();
+
+  soilMoistureData(soilData);
+  bool validTemp = temperatureData(tempData);
+
+  // Create JSON object
+  StaticJsonDocument<256> doc;
+  doc["device_id"] = device_id;
+  if (validTemp) {
+    doc["temperature"] = tempData[0];
+    doc["humidity"] = tempData[1];
+  }
+  doc["soil_moisture_raw"] = soilData[0];
+  doc["soil_moisture_percentage"] = soilData[1];
+  doc["soil_temperature"] = soilTemperature;
+  if (soilPH != -1) {
+    doc["soil_ph"] = soilPH;
+  } else {
+    doc["soil_ph"] = "N/A";  // Invalid readings
+  }
+
+  // Serialize JSON to a string
+  char jsonBuffer[256];
+  serializeJson(doc, jsonBuffer);
+
+  Serial.print("📡 Sending JSON: ");
+  Serial.println(jsonBuffer);
+
+  // Publish JSON to MQTT
+  client.publish(SENSOR_TOPIC, jsonBuffer);
+}
+
+// 🔄 Reconnect to MQTT
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Connecting to MQTT...");
     if (client.connect("ESP8266_TempMonitor")) {
       Serial.println("✅ Connected!");
-      client.subscribe(TEMP_TOPIC);
-      client.subscribe(HUMIDITY_TOPIC);
+      client.subscribe(SENSOR_TOPIC);
     } else {
       Serial.print("❌ Failed, rc=");
       Serial.print(client.state());

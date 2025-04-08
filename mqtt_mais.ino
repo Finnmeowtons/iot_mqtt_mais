@@ -20,6 +20,7 @@ PubSubClient client(espClient);
 #define DHTPin 0            // DHT11 sensor pin
 #define SoilMoisturePin A0  // Soil Moisture Sensor pin
 #define DS18B20_PIN 4       // DS18B20 sensor pin (soil temperature)
+#define BUZZER_PIN 12       // D6
 
 // RS485 Soil pH Sensor
 #define DE 12
@@ -34,17 +35,23 @@ DallasTemperature DS18B20(&oneWire);
 
 #define SENSOR_TOPIC "sensor/device4/data"  // Single topic for JSON data
 
+unsigned long lastSensorSend = 0;
+const unsigned long SENSOR_INTERVAL = 5000;  // 5 seconds
+
 void setup() {
   Serial.begin(115200);
 
   dht.begin();
   DS18B20.begin();
   mod.begin(4800);
+  pinMode(BUZZER_PIN, OUTPUT);
+  noTone(BUZZER_PIN); 
 
   pinMode(DE, OUTPUT);
   pinMode(RE, OUTPUT);
   digitalWrite(DE, LOW);
   digitalWrite(RE, LOW);
+
 
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
@@ -54,8 +61,8 @@ void setup() {
   Serial.println("\nWiFi connected!");
 
   client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
   reconnect();
-
 }
 
 void loop() {
@@ -64,9 +71,11 @@ void loop() {
   }
   client.loop();
 
-  sendSensorData();  // Send all sensor data as JSON
-
-  delay(5000);  // Publish every 5 seconds
+  unsigned long now = millis();
+  if (now - lastSensorSend > SENSOR_INTERVAL) {
+    lastSensorSend = now;
+    sendSensorData();  // Now only runs every 5 seconds
+  } // 5 seconds
 }
 
 // 🌱 Soil Moisture Data (Returns Raw & Percentage)
@@ -178,13 +187,51 @@ void sendSensorData() {
   client.publish(SENSOR_TOPIC, jsonBuffer);
 }
 
+void callback(char* topic, byte* payload, unsigned int length) {
+  String message;
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.print("MQTT Message Received: ");
+  Serial.println(message);
+
+  Serial.print("Message arrived on topic: ");
+  Serial.println(topic);
+
+  if (strcmp(topic, "mais/animal") == 0) {
+    StaticJsonDocument<64> doc;
+    DeserializationError error = deserializeJson(doc, payload, length);
+
+    if (error) {
+      Serial.println("❌ Failed to parse JSON in animal-detection!");
+      return;
+    }
+
+    bool hasAnimal = doc["has_animal"];
+
+    if (hasAnimal) {
+      Serial.println("🚨 Animal detected! Buzzing...");
+  tone(BUZZER_PIN, 1000); // Frequency of 1000 Hz
+      delay(5000);  // Buzz for 5 seconds
+  noTone(BUZZER_PIN);   // Stop the tone
+    }
+  }
+}
+
 // 🔄 Reconnect to MQTT
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Connecting to MQTT...");
-    if (client.connect("ESP8266_TempMonitor")) {
+    if (client.connect("Device4")) {
       Serial.println("✅ Connected!");
-      client.subscribe(SENSOR_TOPIC);
+    
+      client.subscribe("mais/animal");
+      if (client.subscribe("mais/animal")) {
+        Serial.println("✅ Subscribed to mais/animal");
+      } else {
+        Serial.println("❌ Failed to subscribe to mais/animal");
+      }
+
     } else {
       Serial.print("❌ Failed, rc=");
       Serial.print(client.state());

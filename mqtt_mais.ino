@@ -6,7 +6,7 @@
 #include <DallasTemperature.h>
 #include <SoftwareSerial.h>
 
-#define device_id 1  // Device ID number!!!
+#define device_id 4  // Device ID number!!!
 
 // WiFi & MQTT Setup
 const char* ssid = "tp-link";
@@ -32,7 +32,7 @@ DHT dht(DHTPin, DHTTYPE);
 OneWire oneWire(DS18B20_PIN);
 DallasTemperature DS18B20(&oneWire);
 
-#define SENSOR_TOPIC "sensor/device1/data"  // Single topic for JSON data
+#define SENSOR_TOPIC "sensor/device4/data"  // Single topic for JSON data
 
 void setup() {
   Serial.begin(115200);

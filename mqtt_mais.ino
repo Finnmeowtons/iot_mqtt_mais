@@ -20,7 +20,7 @@ PubSubClient client(espClient);
 #define DHTPin 0            // DHT11 sensor pin
 #define SoilMoisturePin A0  // Soil Moisture Sensor pin
 #define DS18B20_PIN 4       // DS18B20 sensor pin (soil temperature)
-#define BUZZER_PIN 12       // D6
+#define BUZZER_PIN 15       // D8
 
 // RS485 Soil pH Sensor
 #define DE 12
